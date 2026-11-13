@@ -9,7 +9,7 @@ import org.springframework.web.bind.support.WebDataBinderFactory;
 import org.springframework.web.context.request.NativeWebRequest;
 import org.springframework.web.method.support.HandlerMethodArgumentResolver;
 import org.springframework.web.method.support.ModelAndViewContainer;
-import uz.businesshub.product.exception.MissingTenantException;
+import uz.businesshub.inventory.exception.MissingTenantException;
 
 import java.util.UUID;
 
