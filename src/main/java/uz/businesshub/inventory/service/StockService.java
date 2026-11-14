@@ -2,11 +2,17 @@ package uz.businesshub.inventory.service;
 
 import feign.FeignException;
 import feign.RetryableException;
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.retry.Retry;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import uz.businesshub.inventory.api.dto.StockResponse;
 import uz.businesshub.inventory.client.ProductClient;
 import uz.businesshub.inventory.client.ProductClient.ProductSummary;
+import uz.businesshub.inventory.config.ResilienceConfig;
 import uz.businesshub.inventory.domain.StockItem;
 import uz.businesshub.inventory.exception.DependencyUnavailableException;
 import uz.businesshub.inventory.exception.ProductInactiveException;
@@ -14,6 +20,7 @@ import uz.businesshub.inventory.exception.ProductNotFoundException;
 import uz.businesshub.inventory.repository.StockItemRepository;
 
 import java.util.UUID;
+import java.util.function.Supplier;
 
 @Service
 public class StockService {
@@ -22,11 +29,19 @@ public class StockService {
     private final ProductClient productClient;
     private final TransactionTemplate tx;
 
+    private final CircuitBreaker circuitBreaker;
+    private final Retry retry;
+    private final Bulkhead bulkhead;
+
     public StockService(StockItemRepository stockRepository, ProductClient productClient,
-                        TransactionTemplate tx) {
+                        TransactionTemplate tx, CircuitBreaker circuitBreaker,
+                        Retry retry, Bulkhead bulkhead) {
         this.stockRepository = stockRepository;
         this.productClient = productClient;
         this.tx = tx;
+        this.circuitBreaker = circuitBreaker;
+        this.retry = retry;
+        this.bulkhead = bulkhead;
     }
 
     public StockResponse receive(UUID companyId, UUID productId, int amount) {
@@ -50,15 +65,20 @@ public class StockService {
     }
 
     private void ensureActiveProduct(UUID productId) {
+        Supplier<ProductSummary> call = () -> productClient.getProduct(productId);
+        call = Bulkhead.decorateSupplier(bulkhead, call);
+        call = CircuitBreaker.decorateSupplier(circuitBreaker, call);
+        call = Retry.decorateSupplier(retry, call);
+
         ProductSummary product;
         try {
-            product = productClient.getProduct(productId);
+            product = call.get();
         } catch (FeignException.NotFound e) {
             throw new ProductNotFoundException(productId);
-        } catch (RetryableException e) {
+        } catch (CallNotPermittedException | BulkheadFullException e) {
             throw new DependencyUnavailableException("product-service", e);
         } catch (FeignException e) {
-            if (e.status() >= 500) throw new DependencyUnavailableException("product-service", e);
+            if (ResilienceConfig.isInfraFailure(e)) throw new DependencyUnavailableException("product-service", e);
             throw e;
         }
         if (!"ACTIVE".equals(product.status())) {
